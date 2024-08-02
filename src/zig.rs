@@ -81,8 +81,13 @@ impl Zig {
         let is_mips32 = target
             .map(|x| x.starts_with("mips") && !x.starts_with("mips64"))
             .unwrap_or_default();
-        let is_macos = target.map(|x| x.contains("macos")).unwrap_or_default();
+        let is_macos = target.map(|x| { dbg!(x); x.contains("macos") }).unwrap_or_default();
+        let is_ios = target.map(|x| { dbg!(x); x.contains("ios") }).unwrap_or_default();
         let is_ohos = target.map(|x| x.contains("ohos")).unwrap_or_default();
+
+        dbg!(is_macos);
+        dbg!(is_ios);
+        dbg!(target);
 
         let rustc_ver = rustc_version::version()?;
         let zig_version = Zig::zig_version()?;
@@ -179,7 +184,7 @@ impl Zig {
                     }
                 }
             }
-            if is_macos {
+            if is_macos || is_ios {
                 if arg.starts_with("-Wl,-exported_symbols_list,") {
                     // zig doesn't support -exported_symbols_list arg
                     // https://clang.llvm.org/docs/ClangCommandLineReference.html#cmdoption-clang-exported_symbols_list
@@ -187,6 +192,9 @@ impl Zig {
                 }
                 if arg == "-Wl,-dylib" {
                     // zig doesn't support -dylib
+                    return None;
+                }
+                if arg == "-lsystem" {
                     return None;
                 }
             }
@@ -278,7 +286,7 @@ impl Zig {
         if has_undefined_dynamic_lookup(cmd_args) {
             new_cmd_args.push("-Wl,-undefined=dynamic_lookup".to_string());
         }
-        if is_macos {
+        if is_macos || is_ios {
             if should_add_libcharset(cmd_args) {
                 new_cmd_args.push("-lcharset".to_string());
             }
@@ -302,11 +310,14 @@ impl Zig {
                             .join("Frameworks")
                             .display()
                     ),
-                    "-DTARGET_OS_IPHONE=0".to_string(),
+                    format!("-DTARGET_OS_IPHONE={}", if is_macos { 0 } else { 1 }),
                 ]);
+
             }
         }
 
+        dbg!(cmd);
+        dbg!(&new_cmd_args);
         let mut child = Self::command()?
             .arg(cmd)
             .args(new_cmd_args)
@@ -489,7 +500,8 @@ impl Zig {
                 cmd.env("WINAPI_NO_BUNDLED_LIBRARIES", "1");
             }
 
-            if raw_target.contains("apple-darwin") {
+            dbg!(raw_target);
+            if raw_target.contains("apple-darwin") || raw_target.contains("apple-ios") {
                 if let Some(sdkroot) = Self::macos_sdk_root() {
                     if env::var_os("PKG_CONFIG_SYSROOT_DIR").is_none() {
                         // Set PKG_CONFIG_SYSROOT_DIR for pkg-config crate
@@ -1106,6 +1118,7 @@ pub fn prepare_zig_linker(target: &str) -> Result<ZigWrapper> {
         cc_args.push(format!("-mcpu={zig_mcpu_default}"));
     }
 
+    dbg!(&triple);
     match triple.operating_system {
         OperatingSystem::Linux => {
             let zig_arch = match arch.as_str() {
@@ -1135,6 +1148,18 @@ pub fn prepare_zig_linker(target: &str) -> Result<ZigWrapper> {
                 cc_args.push(format!("-target {arch}-macos-none{abi_suffix}"));
             } else {
                 cc_args.push(format!("-target {arch}-macos-gnu{abi_suffix}"));
+            }
+        }
+        OperatingSystem::Ios { .. } => {
+            let zig_version = Zig::zig_version()?;
+            // Zig 0.10.0 switched iOS ABI to none
+            // see https://github.com/ziglang/zig/pull/11684
+            if zig_version > semver::Version::new(0, 9, 1) {
+                cc_args.push(format!("-target {arch}-ios-none"));
+                dbg!(&cc_args);
+            } else {
+                // should be tested with older Zig
+                bail!(format!("unsupported target '{rust_target}'"))
             }
         }
         OperatingSystem::Windows { .. } => {
